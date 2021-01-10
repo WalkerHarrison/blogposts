@@ -1,0 +1,296 @@
+---
+title: Avoiding Variance on my Morning Commute
+author: Walker Harrison
+date: '2021-01-10'
+draft: false
+slug: []
+categories: []
+tags: []
+lastmod: '2020-12-29T12:28:19-05:00'
+layout: post
+type: post
+highlight: yes
+summary: Sacrificing value for certainty is a common tradeoff in life. Is this what I was (accidentally) doing when I started walking the first part of my daily commute instead of taking the subway? Some historical MTA data can help answer that question.
+---
+
+
+
+<style type="text/css">
+img[id=commute_pic] {
+  width: 70% !important;
+}
+</style>
+<p>Many moons ago, when people actually physically went to work everyday, I had a pretty lengthy commute by New York City standards. Of the handful of ways to get from Park Slope, Brooklyn to my office in Yankee Stadium, I chose to take the 2/3 train from Grand Army Plaza and then transfer to the 4 train at Nevins Street for the remainder of the trip, typically clocking in at around an hour in travel time.</p>
+<center>
+<img id="commute_pic" src="/img/commute.png"/>
+</center>
+<p>At some point though I started simply walking the first leg from my home to the Nevins Street station. That seems a little crazy, since I was substituting a few stops on the 2/3 for a mile-long march, but I enjoyed the exercise — and I also felt a little more relaxed once I got on the 4-train after my stroll.</p>
+<p>Why did I find peace by walking the first part of my commute? Perhaps the exercise-induced endorphins were rushing through me by the time I was sitting on the 4-train. But I also wonder if I had accidentally decreased the variance in my commute time and with it some of the stress I feel wondering how long the my trip will take.</p>
+<p>How? Well if we consider the duration of the full commute, <span class="math inline">\(X\)</span>, to be the sum of the two legs, <span class="math inline">\(Y_1\)</span> and <span class="math inline">\(Y_2\)</span>, then the variance of the full commute would be the sums of the variances of the two legs, <em>assuming that <span class="math inline">\(Y_1\)</span> and <span class="math inline">\(Y_2\)</span> are independent (which may not necessarily be the case, since subway routes are all a part of a coordinated network)</em>:</p>
+<p><span class="math display">\[
+X = Y_1 + Y_2; \ \ \ Y_1 \perp Y_2
+\]</span>
+<span class="math display">\[
+\text{Var}(X) = \text{Var}(Y_1) + \text{Var}(Y_2)
+\]</span></p>
+<p>As a result, as long as my walks had less variance than the time spent waiting for and riding the 2/3 train until Nevins Street, then the overall variance would also be decreased, since the second leg is identical in both cases. Lucky for us, we can actually test this thought using some historical subway data.</p>
+<p><a href="#skip1"><em><strong>Don’t like/know/care about R? Click here to skip to the results.</strong></em></a></p>
+<p>The MTA publishes the <a href="http://web.mta.info/developers/MTA-Subway-Time-historical-data.html" target="_blank">historical timestamp data</a> of its subway routes, although there are some caveats. I was unable to successfully retrieve the “daily roll-up” files, which meant I had to grab the individual reports that correspond to 5-minute intervals. It also appears that the MTA stopped making these files available at some point in late 2018.</p>
+<p>Either way, I’m able to fetch approximately 200 mornings worth of weekday data from 2018, which should suffice:</p>
+<pre class="r"><code>library(gtfsway)
+library(httr)
+library(tidyverse)
+library(lubridate)
+set.seed(0)
+
+base_url &lt;- &quot;https://datamine-history.s3.amazonaws.com/gtfs&quot;
+
+date &lt;- seq(ymd(&#39;2018-01-01&#39;), ymd(&#39;2018-12-31&#39;), by = &#39;days&#39;)
+
+holidays &lt;- as_date(c(&#39;2018-01-01&#39;, &#39;2018-01-15&#39;, &#39;2018-02-12&#39;, &#39;2018-02-19&#39;, 
+                      &#39;2018-05-28&#39;, &#39;2018-07-04&#39;, &#39;2018-09-03&#39;, &#39;2018-11-12&#39;, 
+                      &#39;2018-11-22&#39;, &#39;2018-12-05&#39;, &#39;2018-12-25&#39;))
+
+# all 2018 non-holiday weekdays
+date &lt;- date[!wday(date) %in% c(1, 7) &amp; !date %in% holidays]
+
+# all 5-minute intervals between 8 and 10 AM
+hour &lt;- 8:9 %&gt;% str_pad(2, pad = &quot;0&quot;)
+minute &lt;- seq(1, 56, by = 5) %&gt;% str_pad(2, pad = &quot;0&quot;)
+
+urls &lt;- crossing(date, hour, minute) %&gt;%
+  mutate(url = paste(base_url, date, hour, minute, sep = &quot;-&quot;)) %&gt;%
+  pull(url)</code></pre>
+<p>Making this many queries to a somewhat unreliable data source requires some defensive programming, which is why the wrapper function <code>safe_get</code> waits a beat between runs and also won’t error if <code>GET</code> fails. A loop is used in place of something like <code>map</code> so as to not lose progress if the process gets hung somewhere and needs to be killed:</p>
+<pre class="r"><code># pause between queries and fail gracefully
+safe_get &lt;- safely(function(url) {Sys.sleep(runif(1, 2, 3)); GET(url)})
+
+requests &lt;- list()
+
+for(i in 1:length(urls)){
+  requests[[i]] &lt;- safe_get(urls[i])
+}
+
+# only keep the successful queries
+good_requests &lt;- requests %&gt;%
+  keep(function(request) !is.null(request$result$status_code) &amp;&amp; request$result$status_code == 200)</code></pre>
+<p>The <code>gtfsway</code> package is a life-saver here since it converts the <a href="https://developers.google.com/transit/gtfs-realtime" target="_blank">Google transit feed</a> into comprehensible R objects, although I did rewrite the <code>gtfs_tripUpdates</code> function to drill down on specific routes in the interest of speed:</p>
+<pre class="r"><code># slight re-write of gtfs_tripUpdates that runs faster
+source(&quot;faster_trip_updates.R&quot;)
+
+# station IDs corresponding to my commute
+my_stops &lt;- as.character(c(234:237, 414:423, 621, 626, 629, 631, 635, 640))
+
+trip_updates &lt;- imap_dfr(good_requests, function(request, idx){
+  
+  trip_updates &lt;- request$result %&gt;%
+    gtfs_realtime() %&gt;%
+    # customized function that accepts routes
+    gtfs_tripUpdates2(routes = as.character(2:4)) %&gt;%
+    imap_dfr(~cbind(
+      idx = .y,
+      url = request$result$url,
+      .x$&quot;dt_trip_info&quot;,
+      .x$&quot;dt_stop_time_update&quot;
+    ))
+  
+  # only return updates for my stops
+  if(nrow(trip_updates &gt; 0)){
+    trip_updates &lt;- trip_updates %&gt;%
+      separate(stop_id, into = c(&#39;stop_id&#39;, &#39;direction&#39;), sep = &quot;(?=[A-Z]$)&quot;) %&gt;%
+      filter(stop_id %in% my_stops)
+  }
+  
+})</code></pre>
+<p>We again hit up the MTA developer site to pull in the station info, and then clean up our dataframe of trip updates so that the timestamps are formatted correctly:</p>
+<pre class="r"><code>stops &lt;- read_csv(&#39;http://web.mta.info/developers/data/nyct/subway/Stations.csv&#39;) %&gt;%
+  janitor::clean_names() %&gt;%
+  select(gtfs_stop_id, stop_name, daytime_routes)
+
+trip_updates &lt;- trip_updates %&gt;%
+  inner_join(stops, by = c(&#39;stop_id&#39; = &#39;gtfs_stop_id&#39;)) %&gt;%
+  mutate(dt = as_datetime(str_extract(url, &#39;\\d{4}-\\d{2}-\\d{2}-\\d{2}-\\d{2}&#39;), format = &quot;%Y-%m-%d-%H-%M&quot;),
+         arrival_time = ifelse(arrival_time == 0, departure_time, arrival_time)) %&gt;%
+  mutate(arrival_time = as_datetime(arrival_time, tz = &quot;America/New_York&quot;),
+         date = date(arrival_time))</code></pre>
+Boiling this dataframe down into sequential stop-by-stop information is a little tricky and requires some <code>dplyr</code> magic. As is, the dataset consists of every update from every five-minute interval that we retrieved, so a single stop on a single subway trip could have dozens of rows of refreshed arrival estimates. What we need to do is filter for:
+<ul>
+<li>
+only the latest possible information about each stop on each trip
+</li>
+<li>
+only the four stops that comprise the first leg
+</li>
+<li>
+only trips that left the first station between 8 AM and 10 AM (or were the first of the day after 10 AM)
+</li>
+</ul>
+<pre class="r"><code># trip updates for 2/3 trains
+
+first_leg &lt;- trip_updates %&gt;%
+  filter(route_id %in% c(&quot;2&quot;, &quot;3&quot;), direction == &quot;N&quot;, str_detect(daytime_routes, &quot;[23]&quot;)) %&gt;%
+  mutate(trip_id = paste0(trip_id, &quot;_&quot;, date)) %&gt;%
+  group_by(trip_id, stop_id) %&gt;%
+  # use latest possible update for each trip/stop
+  filter(dt == max(dt)) %&gt;%
+  arrange(trip_id, arrival_time) %&gt;%
+  group_by(trip_id) %&gt;%
+  # only use the four stops that make up the first leg
+  filter(sum(stop_name == &quot;Grand Army Plaza&quot;) == 1,
+         sum(stop_name == &quot;Nevins St&quot;) == 1) %&gt;%
+  mutate(seq = row_number()) %&gt;%
+  filter(seq &gt;= seq[which(stop_name == &quot;Grand Army Plaza&quot;)],
+         seq &lt;= seq[which(stop_name == &quot;Nevins St&quot;)]) %&gt;%
+  filter(n() == 4) %&gt;%
+  ungroup() %&gt;%
+  mutate(stop_name = factor(stop_name, levels = unique(.$stop_name)),
+         stop_idx = as.numeric(stop_name)) %&gt;%
+  group_by(trip_id) %&gt;%
+  # record when train leaves first stop
+  mutate(start_time = arrival_time[which.min(stop_idx)]) %&gt;%
+  ungroup() %&gt;%
+  # filter for 8AM - 10AM window (or just after)
+  filter(hour(start_time) &gt;= 8) %&gt;%
+  mutate(diff = ifelse(hour(start_time) &lt; 10, Inf, start_time)) %&gt;%
+  filter(hour(start_time) &lt; 10 | diff == min(diff)) %&gt;%
+  select(-diff) %&gt;%
+  mutate(route = &quot;first leg (2/3)&quot;)</code></pre>
+<p>The logic for the second leg is similar, although now we have to record when exactly the first leg is finishing up each day, since these <code>transfers</code> will determine the window during which our second leg can actually start.</p>
+<pre class="r"><code># find earliest and latest times when first leg is ending
+transfers &lt;- first_leg %&gt;%
+  filter(stop_idx == max(stop_idx)) %&gt;%
+  group_by(date) %&gt;%
+  summarize(first = min(arrival_time),
+            last = max(arrival_time))
+
+second_leg &lt;- trip_updates %&gt;%
+  filter(route_id == &quot;4&quot;, direction == &quot;N&quot;, str_detect(daytime_routes, &quot;4&quot;)) %&gt;%
+  mutate(trip_id = paste0(trip_id, &quot;_&quot;, date)) %&gt;%
+  group_by(trip_id, stop_id) %&gt;%
+  # use latest possible update for each trip/stop
+  filter(dt == max(dt)) %&gt;%
+  arrange(trip_id, arrival_time) %&gt;%
+  group_by(trip_id) %&gt;%
+  # only use the 14 stops that make up the second leg
+  filter(sum(stop_name == &quot;Nevins St&quot;) == 1,
+         sum(stop_name == &quot;161 St-Yankee Stadium&quot;) == 1) %&gt;%
+  mutate(seq = row_number()) %&gt;%
+  filter(seq &gt;= seq[which(stop_name == &quot;Nevins St&quot;)],
+         seq &lt;= seq[which(stop_name == &quot;161 St-Yankee Stadium&quot;)]) %&gt;%
+  filter(n() == 14) %&gt;%
+  mutate(stop_name = factor(stop_name, levels = unique(.$stop_name)),
+         stop_idx = as.numeric(stop_name) + max(first_leg$stop_idx) - 1) %&gt;%
+  inner_join(transfers, by = &#39;date&#39;) %&gt;%
+  # record when train leaves first stop
+  mutate(start_time = arrival_time[which.min(stop_idx)]) %&gt;%
+  ungroup() %&gt;%
+  # filter for the transfer window (or just after)
+  filter(start_time &gt; first) %&gt;%
+  mutate(diff = ifelse(start_time &lt; last, Inf, start_time - last)) %&gt;%
+  group_by(date) %&gt;%
+  filter(start_time &lt; last | diff == min(diff)) %&gt;%
+  ungroup() %&gt;%
+  select(-first, -last, -diff) %&gt;%
+  mutate(route = &quot;second leg (4)&quot;)</code></pre>
+<p>Put the two legs together and you get all the possible complete subway rides, transfers included, had I arrived at the first station (Grand Army Plaza) between 8 AM and 10 AM. Below are those rides for January 2nd, 2018:</p>
+<pre class="r"><code>full_trip &lt;- rbind(first_leg, second_leg)
+
+full_trip %&gt;%
+  filter(month(arrival_time) == 1, day(arrival_time) == 2) %&gt;%
+  ggplot(aes(arrival_time, stop_idx, group = trip_id)) +
+  geom_line(aes(col = route)) +
+  geom_point(aes(col = route), alpha = 0.5, size = 2) +
+  scale_y_continuous(breaks = 1:max(full_trip$stop_idx),
+                     labels = unique(c(levels(first_leg$stop_name), levels(second_leg$stop_name)))) +
+  theme_bw() +
+  labs(x = &quot;time&quot;, y = &quot;&quot;, color = &quot;&quot;) +
+  facet_wrap(~date(arrival_time), scales = &quot;free_x&quot;, nrow = 1)</code></pre>
+<div id="skip1">
+
+</div>
+<p><img src="index_files/figure-html/unnamed-chunk-11-1.png" width="672" /></p>
+<p><a href="#skip2"><em><strong>Don’t like/know/care about R? Click here to skip to the (other) results.</strong></em></a></p>
+<p>In order to use this data to estimate the distribution of the duration of the first leg, I need to simulate my arrival to Grand Army Plaza and calculate how long I’d have to wait to get on a train. To do so, I sample uniformly from the 8AM - 10AM window thousands of times across the various dates in the dataset and determine the first train I would have been able to board in each case:</p>
+<pre class="r"><code># get duration of every possible first leg
+two_three_trips &lt;- full_trip %&gt;%
+  filter(route_id %in% c(&quot;2&quot;, &quot;3&quot;)) %&gt;%
+  group_by(date, trip_id) %&gt;%
+  summarize(start = min(arrival_time),
+            end = max(arrival_time))
+
+n_sims &lt;- 10000
+
+# simulate arriving at station and taking first possible train
+first_leg_subway &lt;- data.frame(
+  # random date, random time in morning
+  date = sample(unique(transfers$date), n_sims, replace = TRUE),
+  seconds_past_8 = runif(n_sims, 0, 60*60*2)
+) %&gt;%
+  mutate(sim_idx = row_number()) %&gt;%
+  mutate(datetime = make_datetime(year(date), month(date), day(date), 
+                                  8, 0, seconds_past_8, 
+                                  tz = &quot;America/New_York&quot;)) %&gt;%
+  inner_join(two_three_trips, by = &#39;date&#39;)  %&gt;%
+  filter(datetime &lt; start) %&gt;%
+  group_by(sim_idx) %&gt;%
+  # find first train and calculate total commute time
+  filter((start - datetime) == min(start - datetime)) %&gt;%
+  mutate(duration_leg1 = as.numeric(difftime(end, datetime, units = &#39;mins&#39;)))</code></pre>
+<p>Simulating the duration of my walk skews much more toward guesswork, since I don’t have actual daily data on how long it took each time. But I did recently time four walks down to Nevins and got pretty consistent times: 14:53, 15:05, 14:39, and 15:32. It feels reasonable to model the journey as normally distributed around 15 minutes with a standard deviation of 30 seconds. (It’s also entertaining to imagine what would have to happen to explain the fraction of walks that would theoretically take 20+ minutes – chased by a street gang in the wrong direction?)</p>
+<pre class="r"><code># simulating leaving house between 8 and 9:30 and then taking a N(15, 0.5) walk
+first_leg_walking &lt;- data.frame(
+  date = sample(unique(transfers$date), n_sims, replace = TRUE),
+  leaving_time = runif(n_sims, 0, 60*60*1.5),
+  duration_leg1 = rnorm(n_sims, mean = 15, sd = 0.5)) %&gt;%
+  mutate(sim_idx = row_number()) %&gt;%
+  mutate(end = make_datetime(year(date), month(date), day(date), 
+                             8, 0, leaving_time + 60*duration_leg1, 
+                             tz = &quot;America/New_York&quot;))</code></pre>
+<p>Once we’ve simulated both versions of the first leg, we can just attach each one to the second leg data and determine which 4-train these hypothetical commuters would be able to board:</p>
+<pre class="r"><code># get duration of every possible second leg
+four_trips &lt;- full_trip %&gt;%
+  filter(route_id %in% c(&quot;4&quot;)) %&gt;%
+  group_by(date, trip_id) %&gt;%
+  summarize(start = min(arrival_time),
+            end = max(arrival_time))
+
+# determine which 4-train simulated subway commuters could board
+full_trip_subway &lt;- first_leg_subway %&gt;%
+  inner_join(four_trips, by = &#39;date&#39;, suffix = c(&quot;_leg1&quot;, &quot;_leg2&quot;)) %&gt;% 
+  filter(end_leg1 &lt; start_leg2) %&gt;%
+  group_by(sim_idx) %&gt;%
+  filter(start_leg2 == min(start_leg2)) %&gt;%
+  mutate(duration_full = as.numeric(difftime(end_leg2, datetime, units = &#39;mins&#39;)))
+
+# determine which 4-train simulated walking commuters could board
+full_trip_walking &lt;- first_leg_walking %&gt;%
+  inner_join(four_trips, by = &#39;date&#39;, suffix = c(&quot;_leg1&quot;, &quot;_leg2&quot;)) %&gt;%
+  filter(end_leg1 &lt; start) %&gt;%
+  group_by(sim_idx) %&gt;%
+  filter((start) == min(start)) %&gt;%
+  mutate(duration_full = as.numeric(difftime(end_leg2, end_leg1, units = &#39;mins&#39;)) + duration_leg1)</code></pre>
+<p>Finally we can graph the distribution of simulated first leg and full commute durations under both conditions. As we guaranteed by assuming a relatively consistent walking time, the variance of the first leg is much wider when taking the train despite also having a much smaller mean. This discrepancy is passed along to the full commute durations, as there’s also less overall variance when walking the first leg:</p>
+<pre class="r"><code>rbind(
+  full_trip_subway %&gt;%
+    ungroup() %&gt;%
+    select(duration_leg1, duration_full) %&gt;%
+    mutate(type = &quot;first leg on subway&quot;),
+  full_trip_walking %&gt;%
+    ungroup() %&gt;%
+    select(duration_leg1, duration_full) %&gt;%
+    mutate(type = &quot;first leg walking&quot;)
+) %&gt;% 
+  mutate(idx = row_number()) %&gt;%
+  gather(interval, duration, -idx, -type) %&gt;%
+  mutate(interval = ifelse(interval == &quot;duration_leg1&quot;, &quot;first leg&quot;, &quot;full commute&quot;)) %&gt;%
+  ggplot(aes(duration, fill = type)) +
+  geom_histogram(col = &quot;black&quot;) +
+  facet_grid(type~interval, scales = &quot;free_x&quot;) +
+  theme_bw() +
+  theme(strip.text.y = element_blank()) +
+  labs(fill = &quot;&quot;)</code></pre>
+<div id="skip2">
+
+</div>
+<p><img src="index_files/figure-html/unnamed-chunk-16-1.png" width="672" /></p>
+<p>Of course, the two distributions describing the full journey are very similar, and the difference in spread is mostly washed away against the backdrop of lengthy commutes in general. By walking I wasn’t really saving that much uncertainty or avoiding particularly long trips caused by 4-train delays. But the study is still a decent example of a tradeoff between expected value and variance, which perhaps can explain why I found those walks a little more relaxing than waiting for a train.</p>
